@@ -1,10 +1,10 @@
 # Missing Data Handling Guide
 
-This document describes how missing data was handled in the aggregated dataset for modeling.
+This document describes the missing data in the aggregated dataset for modeling.
 
 ## Overview
 
-The aggregated dataset (`aggregated_dataset_for_modeling.xlsx`) contains 46,872 rows with 35 predictors and 1 output variable. Some features had missing values that required imputation.
+The aggregated dataset (`aggregated_dataset_for_modeling.xlsx`) contains 46,872 rows with 35 predictors and 1 output variable. **NO PREPROCESSING OR IMPUTATION IS PERFORMED** - missing values are preserved as NaN.
 
 ## Missing Data Summary
 
@@ -13,12 +13,13 @@ The aggregated dataset (`aggregated_dataset_for_modeling.xlsx`) contains 46,872 
 **Missing Pattern:** Some country-brand combinations may not have data for all 24 months before generic entry.
 
 **Handling Method:** 
-- Missing values were filled with **0**
-- Rationale: If a month has no data, it indicates zero volume for that period
+- **Missing values are preserved as NaN**
+- No imputation performed
+- User should decide how to handle these in their model
 
 **Impact:** 
 - 24 features created from months -24 to -1
-- Missing values are rare and represent periods with no recorded volume
+- Missing values indicate periods with no recorded volume data
 
 ### 2. Number of Generic Competitors (n_gxs)
 
@@ -27,14 +28,13 @@ The aggregated dataset (`aggregated_dataset_for_modeling.xlsx`) contains 46,872 
 - Missing data occurs when generic competitor information is not available for specific country-brand-month combinations
 
 **Handling Method:**
-- Missing values were filled with **0**
-- Rationale: Missing data likely indicates no generic competitors recorded, which is equivalent to 0 competitors
+- **Missing values are preserved as NaN**
+- No imputation performed
+- User should decide how to handle these (e.g., fill with 0, forward-fill, or use as indicator)
 
 **Impact:**
 - This is a significant portion of missing data
-- Consider this in model interpretation: when n_gxs = 0, it could mean either:
-  - No generic competitors exist, OR
-  - Data was not recorded (missing)
+- Consider creating a missing indicator feature: `n_gxs_missing = n_gxs.isna()`
 
 ### 3. Hospital Rate (hospital_rate)
 
@@ -43,68 +43,71 @@ The aggregated dataset (`aggregated_dataset_for_modeling.xlsx`) contains 46,872 
 - Missing data occurs when hospital rate information is not available for specific country-brand combinations
 
 **Handling Method:**
-- Missing values were filled with the **median hospital rate: 4.95%**
-- Rationale: Median is robust to outliers and represents a typical hospital rate
+- **Missing values are preserved as NaN**
+- No imputation performed
+- User should decide how to handle these (e.g., median imputation, mode, or country-specific imputation)
 
 **Impact:**
 - Small percentage of missing data
-- Median imputation preserves the distribution better than mean for this feature
+- Could use median, mean, or country/therapeutic area-specific imputation
 
-## Data Quality Checks
+## Data Quality Summary
 
-### Before Imputation:
-- Total missing values: 13,872+ (across all features)
-- Most critical: n_gxs (26.32% missing)
-
-### After Imputation:
-- All missing values handled
-- Dataset is complete and ready for modeling
+### Missing Values by Column:
+| Feature | Missing Count | Missing % | Recommended Handling |
+|---------|---------------|-----------|----------------------|
+| Pre-entry volumes (24 features) | Variable | Variable | Zero fill, forward-fill, or interpolation |
+| n_gxs | 12,336 | 26.32% | Zero fill or missing indicator |
+| hospital_rate | 1,536 | 3.28% | Median/mode imputation or country-specific |
 
 ## Recommendations for Model Training
 
-1. **Feature Engineering:**
-   - Consider creating a binary indicator for missing n_gxs: `n_gxs_missing = (n_gxs == 0) & (original_n_gxs was missing)`
-   - This can help the model distinguish between "no generics" vs "missing data"
+1. **Pre-entry Volume Features:**
+   - Option 1: Fill missing with 0 (assume no volume)
+   - Option 2: Forward-fill or backward-fill within country-brand groups
+   - Option 3: Interpolation for time series
+   - Option 4: Create missing indicators
 
-2. **Model Validation:**
-   - When evaluating model performance, consider the impact of imputed values
-   - Test model robustness by comparing performance on records with original vs imputed values
+2. **n_gxs (Generic Competitors):**
+   - Option 1: Fill with 0 (assume no generics)
+   - Option 2: Forward-fill within country-brand groups
+   - Option 3: Create binary indicator: `has_n_gxs_data = ~n_gxs.isna()`
+   - Option 4: Use separate model for missing vs non-missing
 
-3. **Alternative Approaches:**
-   - For n_gxs: Consider using forward-fill or backward-fill within country-brand groups
-   - For hospital_rate: Could use country-specific or therapeutic area-specific medians instead of global median
+3. **hospital_rate:**
+   - Option 1: Fill with median (4.95) or mean
+   - Option 2: Country-specific median
+   - Option 3: Therapeutic area-specific median
+   - Option 4: Mode imputation
+
+4. **Model Validation:**
+   - When evaluating model performance, consider the impact of missing values
+   - Test model robustness by comparing performance on records with vs without missing values
+   - Consider using models that handle missing values natively (e.g., XGBoost, LightGBM)
 
 ## Code Reference
 
-The missing data handling is implemented in `create_aggregated_dataset.py`:
+The dataset is created in `create_aggregated_dataset.py` with **NO IMPUTATION**:
 
 ```python
-# Fill missing pre-entry volumes with 0
-volume_missing = [col for col in volume_cols if col in missing_cols.index]
-if volume_missing:
-    dataset[volume_missing] = dataset[volume_missing].fillna(0)
-
-# Fill missing n_gxs with 0
-if 'n_gxs' in missing_cols.index:
-    dataset['n_gxs'] = dataset['n_gxs'].fillna(0)
-
-# Fill missing hospital_rate with median
-if 'hospital_rate' in missing_cols.index:
-    median_hosp = dataset['hospital_rate'].median()
-    dataset['hospital_rate'] = dataset['hospital_rate'].fillna(median_hosp)
+# All merges use how='left' - missing values preserved as NaN
+dataset = dataset.merge(avg_vol, on=['country', 'brand_name'], how='left')
+dataset = dataset.merge(pre_vol_pivot, on=['country', 'brand_name'], how='left')
+dataset = dataset.merge(gen_train[['country', 'brand_name', 'months_postgx', 'n_gxs']], 
+                        on=['country', 'brand_name', 'months_postgx'], how='left')
+dataset = dataset.merge(med_train[...], on=['country', 'brand_name'], how='left')
 ```
 
-## Summary Table
+## Summary
 
-| Feature | Missing % | Imputation Method | Value Used |
-|---------|-----------|-------------------|------------|
-| Pre-entry volumes (24 features) | Variable | Zero fill | 0 |
-| n_gxs | 26.32% | Zero fill | 0 |
-| hospital_rate | 3.28% | Median imputation | 4.95 |
+- **Total missing values:** ~13,872+ (across all features)
+- **Imputation performed:** None
+- **Missing values preserved as:** NaN
+- **User responsibility:** Handle missing values according to their modeling approach
 
 ## Notes
 
-- All other features (avg_vol, months_postgx, month, medicine info features, country, brand_name) had no missing values
+- All other features (avg_vol, months_postgx, month, medicine info features except hospital_rate, country, brand_name) have no missing values
 - The output variable (volume) has no missing values as it's the target we're predicting
 - Missing data patterns may be informative - consider exploring relationships between missingness and other features
-
+- Some models (XGBoost, LightGBM, CatBoost) can handle missing values natively

@@ -1,6 +1,7 @@
 """
 Create Aggregated Excel File for Modeling
-Combines all predictors and outputs into a single dataset
+Combines all predictors and outputs into a single dataset - NO PREPROCESSING
+Raw data only, no missing value imputation
 """
 
 import pandas as pd
@@ -9,7 +10,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("=" * 80)
-print("CREATING AGGREGATED DATASET FOR MODELING")
+print("CREATING AGGREGATED DATASET FOR MODELING (NO PREPROCESSING)")
 print("=" * 80)
 
 # =============================================================================
@@ -29,10 +30,10 @@ print(f"Generics train: {gen_train.shape}")
 print(f"Medicine info train: {med_train.shape}")
 
 # =============================================================================
-# 2. COMPUTE AVG_VOL (from months -12 to -1)
+# 2. COMPUTE AVG_VOL (from months -12 to -1) - This is a required feature
 # =============================================================================
 print("\n" + "=" * 80)
-print("COMPUTING AVG_VOL")
+print("COMPUTING AVG_VOL (Required Feature)")
 print("=" * 80)
 
 # Filter for months -12 to -1 (12 months before generic entry)
@@ -45,7 +46,7 @@ avg_vol.columns = ['country', 'brand_name', 'avg_vol']
 print(f"Computed avg_vol for {len(avg_vol)} country-brand combinations")
 
 # =============================================================================
-# 3. CREATE PRE-ENTRY VOLUME FEATURES (months -24 to -1)
+# 3. CREATE PRE-ENTRY VOLUME FEATURES (months -24 to -1) - Raw data pivot
 # =============================================================================
 print("\n" + "=" * 80)
 print("CREATING PRE-ENTRY VOLUME FEATURES (months -24 to -1)")
@@ -54,22 +55,22 @@ print("=" * 80)
 # Filter pre-entry data (months -24 to -1)
 pre_entry_full = vol_train[(vol_train['months_postgx'] >= -24) & (vol_train['months_postgx'] <= -1)].copy()
 
-# Pivot to create features for each month
+# Pivot to create features for each month - NO AGGREGATION, just pivot
 pre_vol_pivot = pre_entry_full.pivot_table(
     index=['country', 'brand_name'],
     columns='months_postgx',
     values='volume',
-    aggfunc='mean'
+    aggfunc='first'  # Use first value if duplicates exist
 ).reset_index()
 
-# Rename columns to volume_m_24, volume_m_23, ..., volume_m_1
+# Rename columns to volume_m-24, volume_m-23, ..., volume_m-1
 pre_vol_pivot.columns = ['country', 'brand_name'] + [f'volume_m{int(col)}' for col in pre_vol_pivot.columns[2:]]
 
 print(f"Created {len(pre_vol_pivot.columns) - 2} pre-entry volume features")
 print(f"Features: {list(pre_vol_pivot.columns[2:])}")
 
 # =============================================================================
-# 4. PREPARE MAIN DATASET (for months 0-23)
+# 4. PREPARE MAIN DATASET (for months 0-23) - This is our prediction target
 # =============================================================================
 print("\n" + "=" * 80)
 print("PREPARING MAIN DATASET")
@@ -81,13 +82,13 @@ main_data = vol_train[(vol_train['months_postgx'] >= 0) & (vol_train['months_pos
 print(f"Main data shape (post-entry): {main_data.shape}")
 
 # =============================================================================
-# 5. MERGE ALL FEATURES
+# 5. MERGE ALL FEATURES - NO MISSING VALUE IMPUTATION
 # =============================================================================
 print("\n" + "=" * 80)
-print("MERGING ALL FEATURES")
+print("MERGING ALL FEATURES (NO PREPROCESSING)")
 print("=" * 80)
 
-# Start with main data
+# Start with main data - keep volume as output
 dataset = main_data[['country', 'brand_name', 'months_postgx', 'month', 'volume']].copy()
 print(f"Starting with main data: {dataset.shape}")
 
@@ -99,8 +100,7 @@ print(f"After adding avg_vol: {dataset.shape}")
 dataset = dataset.merge(pre_vol_pivot, on=['country', 'brand_name'], how='left')
 print(f"After adding pre-entry volumes: {dataset.shape}")
 
-# Add generics data (n_gxs)
-# Merge generics data - need to match by country, brand_name, and months_postgx
+# Add generics data (n_gxs) - NO FILLING MISSING VALUES
 dataset = dataset.merge(gen_train[['country', 'brand_name', 'months_postgx', 'n_gxs']], 
                         on=['country', 'brand_name', 'months_postgx'], how='left')
 print(f"After adding generics (n_gxs): {dataset.shape}")
@@ -162,37 +162,20 @@ print(f"Number of predictors: {len(predictor_cols)}")
 print(f"Number of output columns: 1")
 
 # =============================================================================
-# 7. HANDLE MISSING VALUES
+# 7. CHECK MISSING VALUES (NO IMPUTATION - JUST REPORT)
 # =============================================================================
 print("\n" + "=" * 80)
-print("HANDLING MISSING VALUES")
+print("MISSING VALUES SUMMARY (NO IMPUTATION PERFORMED)")
 print("=" * 80)
 
 missing_summary = dataset.isnull().sum()
 missing_cols = missing_summary[missing_summary > 0]
 
 if len(missing_cols) > 0:
-    print("\nMissing values by column:")
+    print("\nMissing values by column (preserved as NaN):")
     for col, count in missing_cols.items():
         pct = count / len(dataset) * 100
         print(f"  {col}: {count:,} ({pct:.2f}%)")
-    
-    # Fill missing pre-entry volumes with 0 (if no data for that month)
-    volume_missing = [col for col in volume_cols if col in missing_cols.index]
-    if volume_missing:
-        print(f"\nFilling {len(volume_missing)} missing pre-entry volume features with 0")
-        dataset[volume_missing] = dataset[volume_missing].fillna(0)
-    
-    # Fill missing n_gxs with 0 (no generics data)
-    if 'n_gxs' in missing_cols.index:
-        print("Filling missing n_gxs with 0")
-        dataset['n_gxs'] = dataset['n_gxs'].fillna(0)
-    
-    # Fill missing hospital_rate with median
-    if 'hospital_rate' in missing_cols.index:
-        median_hosp = dataset['hospital_rate'].median()
-        print(f"Filling missing hospital_rate with median: {median_hosp:.2f}")
-        dataset['hospital_rate'] = dataset['hospital_rate'].fillna(median_hosp)
 else:
     print("No missing values found!")
 
@@ -282,7 +265,8 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             'Unique Country-Brand Combinations',
             'Months Post Generic Entry Range',
             'Missing Values (Total)',
-            'Missing Values (%)'
+            'Missing Values (%)',
+            'Note'
         ],
         'Value': [
             len(dataset),
@@ -294,7 +278,8 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             dataset.groupby(['country', 'brand_name']).ngroups,
             f"{dataset['months_postgx'].min()} to {dataset['months_postgx'].max()}",
             dataset.isnull().sum().sum(),
-            f"{dataset.isnull().sum().sum() / (len(dataset) * len(dataset.columns)) * 100:.2f}%"
+            f"{dataset.isnull().sum().sum() / (len(dataset) * len(dataset.columns)) * 100:.2f}%",
+            'No preprocessing - missing values preserved as NaN'
         ]
     })
     
@@ -302,11 +287,11 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
 
 print(f"\nSaved to: {output_file}")
 print("\nExcel file contains 3 sheets:")
-print("  1. Main Dataset - Full dataset with all predictors and output")
+print("  1. Main Dataset - Full dataset with all predictors and output (missing values as NaN)")
 print("  2. Metadata - Column descriptions and types")
 print("  3. Summary - Dataset statistics")
 
 print("\n" + "=" * 80)
-print("AGGREGATION COMPLETE!")
+print("AGGREGATION COMPLETE! (NO PREPROCESSING)")
 print("=" * 80)
-
+print("\nNOTE: Missing values are preserved as NaN - no imputation performed")
