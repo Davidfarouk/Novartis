@@ -1,7 +1,8 @@
 """
 Create Aggregated Excel File for Modeling
-Combines all predictors and outputs into a single dataset - NO PREPROCESSING
-Raw data only, no missing value imputation
+Each row = one brand-month combination (for months 0-23)
+All brand information aggregated from all Excel files
+NO PREPROCESSING - missing values preserved as NaN
 """
 
 import pandas as pd
@@ -10,7 +11,10 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("=" * 80)
-print("CREATING AGGREGATED DATASET FOR MODELING (NO PREPROCESSING)")
+print("CREATING AGGREGATED DATASET FOR MODELING")
+print("=" * 80)
+print("Structure: One row per brand-month (months 0-23)")
+print("All brand information aggregated from all source files")
 print("=" * 80)
 
 # =============================================================================
@@ -30,7 +34,7 @@ print(f"Generics train: {gen_train.shape}")
 print(f"Medicine info train: {med_train.shape}")
 
 # =============================================================================
-# 2. COMPUTE AVG_VOL (from months -12 to -1) - This is a required feature
+# 2. COMPUTE AVG_VOL (from months -12 to -1) - Required feature
 # =============================================================================
 print("\n" + "=" * 80)
 print("COMPUTING AVG_VOL (Required Feature)")
@@ -39,14 +43,14 @@ print("=" * 80)
 # Filter for months -12 to -1 (12 months before generic entry)
 pre_entry = vol_train[(vol_train['months_postgx'] >= -12) & (vol_train['months_postgx'] <= -1)]
 
-# Calculate avg_vol
+# Calculate avg_vol per country-brand
 avg_vol = pre_entry.groupby(['country', 'brand_name'])['volume'].mean().reset_index()
 avg_vol.columns = ['country', 'brand_name', 'avg_vol']
 
 print(f"Computed avg_vol for {len(avg_vol)} country-brand combinations")
 
 # =============================================================================
-# 3. CREATE PRE-ENTRY VOLUME FEATURES (months -24 to -1) - Raw data pivot
+# 3. CREATE PRE-ENTRY VOLUME FEATURES (months -24 to -1)
 # =============================================================================
 print("\n" + "=" * 80)
 print("CREATING PRE-ENTRY VOLUME FEATURES (months -24 to -1)")
@@ -55,7 +59,7 @@ print("=" * 80)
 # Filter pre-entry data (months -24 to -1)
 pre_entry_full = vol_train[(vol_train['months_postgx'] >= -24) & (vol_train['months_postgx'] <= -1)].copy()
 
-# Pivot to create features for each month - NO AGGREGATION, just pivot
+# Pivot to create features for each month - one value per country-brand
 pre_vol_pivot = pre_entry_full.pivot_table(
     index=['country', 'brand_name'],
     columns='months_postgx',
@@ -70,49 +74,52 @@ print(f"Created {len(pre_vol_pivot.columns) - 2} pre-entry volume features")
 print(f"Features: {list(pre_vol_pivot.columns[2:])}")
 
 # =============================================================================
-# 4. PREPARE MAIN DATASET (for months 0-23) - This is our prediction target
+# 4. START WITH POST-ENTRY VOLUME DATA (months 0-23) - This is our base
 # =============================================================================
 print("\n" + "=" * 80)
-print("PREPARING MAIN DATASET")
+print("PREPARING MAIN DATASET (Post-entry months 0-23)")
 print("=" * 80)
 
-# Filter for post-entry months (0-23) - this is our prediction target
+# Filter for post-entry months (0-23) - each row is a brand-month combination
 main_data = vol_train[(vol_train['months_postgx'] >= 0) & (vol_train['months_postgx'] <= 23)].copy()
 
 print(f"Main data shape (post-entry): {main_data.shape}")
+print(f"Each row represents: one brand-month combination")
+print(f"Total brand-month combinations: {len(main_data)}")
 
 # =============================================================================
-# 5. MERGE ALL FEATURES - NO MISSING VALUE IMPUTATION
+# 5. AGGREGATE ALL BRAND INFORMATION FROM ALL FILES
 # =============================================================================
 print("\n" + "=" * 80)
-print("MERGING ALL FEATURES (NO PREPROCESSING)")
+print("AGGREGATING ALL BRAND INFORMATION FROM ALL FILES")
 print("=" * 80)
 
-# Start with main data - keep volume as output
+# Start with volume data (this gives us the base structure - one row per brand-month)
 dataset = main_data[['country', 'brand_name', 'months_postgx', 'month', 'volume']].copy()
-print(f"Starting with main data: {dataset.shape}")
+print(f"1. Starting with volume data: {dataset.shape}")
+print(f"   Columns: {list(dataset.columns)}")
 
-# Add avg_vol
+# Add avg_vol (computed feature)
 dataset = dataset.merge(avg_vol, on=['country', 'brand_name'], how='left')
-print(f"After adding avg_vol: {dataset.shape}")
+print(f"2. Added avg_vol: {dataset.shape}")
 
-# Add pre-entry volume features
+# Add pre-entry volume features (months -24 to -1)
 dataset = dataset.merge(pre_vol_pivot, on=['country', 'brand_name'], how='left')
-print(f"After adding pre-entry volumes: {dataset.shape}")
+print(f"3. Added pre-entry volumes (24 features): {dataset.shape}")
 
-# Add generics data (n_gxs) - NO FILLING MISSING VALUES
+# Add generics data (n_gxs) - matched by country, brand_name, and months_postgx
 dataset = dataset.merge(gen_train[['country', 'brand_name', 'months_postgx', 'n_gxs']], 
                         on=['country', 'brand_name', 'months_postgx'], how='left')
-print(f"After adding generics (n_gxs): {dataset.shape}")
+print(f"4. Added generics data (n_gxs): {dataset.shape}")
 
 # Add medicine info (static features - same for all months for each country-brand)
 dataset = dataset.merge(med_train[['country', 'brand_name', 'ther_area', 'main_package', 
                                    'hospital_rate', 'biological', 'small_molecule']], 
                         on=['country', 'brand_name'], how='left')
-print(f"After adding medicine info: {dataset.shape}")
+print(f"5. Added medicine info (ther_area, main_package, hospital_rate, biological, small_molecule): {dataset.shape}")
 
 # =============================================================================
-# 6. REORDER COLUMNS (Predictors first, then Output)
+# 6. ORGANIZE COLUMNS: Predictors first, then Output
 # =============================================================================
 print("\n" + "=" * 80)
 print("ORGANIZING COLUMNS")
@@ -123,7 +130,6 @@ predictor_cols = []
 
 # 1. Pre-entry volume features (months -24 to -1)
 volume_cols = [col for col in dataset.columns if col.startswith('volume_m')]
-# Sort by month number (extract the number after 'volume_m')
 volume_cols.sort(key=lambda x: int(x.replace('volume_m', '')))  # Sort by month number
 predictor_cols.extend(volume_cols)
 
@@ -136,7 +142,7 @@ predictor_cols.append('months_postgx')
 # 4. month (calendar)
 predictor_cols.append('month')
 
-# 5. n_gxs
+# 5. n_gxs (generics)
 predictor_cols.append('n_gxs')
 
 # 6. Medicine info features
@@ -159,13 +165,16 @@ dataset = dataset[final_cols]
 
 print(f"\nFinal dataset shape: {dataset.shape}")
 print(f"Number of predictors: {len(predictor_cols)}")
-print(f"Number of output columns: 1")
+print(f"Number of output columns: 1 (volume)")
+print(f"\nColumn order:")
+print(f"  Predictors ({len(predictor_cols)}): {', '.join(predictor_cols[:5])}... + {len(predictor_cols)-5} more")
+print(f"  Output (1): {output_col}")
 
 # =============================================================================
 # 7. CHECK MISSING VALUES (NO IMPUTATION - JUST REPORT)
 # =============================================================================
 print("\n" + "=" * 80)
-print("MISSING VALUES SUMMARY (NO IMPUTATION PERFORMED)")
+print("MISSING VALUES SUMMARY (NO IMPUTATION - PRESERVED AS NaN)")
 print("=" * 80)
 
 missing_summary = dataset.isnull().sum()
@@ -180,21 +189,23 @@ else:
     print("No missing values found!")
 
 # =============================================================================
-# 8. CREATE SUMMARY INFORMATION
+# 8. DATASET SUMMARY
 # =============================================================================
 print("\n" + "=" * 80)
 print("DATASET SUMMARY")
 print("=" * 80)
 
-print(f"\nTotal rows: {len(dataset):,}")
+print(f"\nTotal rows: {len(dataset):,} (one row per brand-month combination)")
 print(f"Total columns: {len(dataset.columns)}")
-print(f"Predictors: {len(predictor_cols)}")
-print(f"Output: 1 (volume)")
+print(f"  - Predictors: {len(predictor_cols)}")
+print(f"  - Output: 1 (volume)")
 
-print(f"\nMonths_postgx range: {dataset['months_postgx'].min()} to {dataset['months_postgx'].max()}")
-print(f"Unique countries: {dataset['country'].nunique()}")
-print(f"Unique brands: {dataset['brand_name'].nunique()}")
-print(f"Unique country-brand combinations: {dataset.groupby(['country', 'brand_name']).ngroups}")
+print(f"\nData structure:")
+print(f"  - Months post generic entry: {dataset['months_postgx'].min()} to {dataset['months_postgx'].max()}")
+print(f"  - Unique countries: {dataset['country'].nunique()}")
+print(f"  - Unique brands: {dataset['brand_name'].nunique()}")
+print(f"  - Unique country-brand combinations: {dataset.groupby(['country', 'brand_name']).ngroups}")
+print(f"  - Average rows per brand: {len(dataset) / dataset['brand_name'].nunique():.1f}")
 
 # =============================================================================
 # 9. SAVE TO EXCEL
@@ -209,8 +220,9 @@ output_file = 'aggregated_dataset_for_modeling.xlsx'
 with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
     # Main dataset
     dataset.to_excel(writer, sheet_name='Main Dataset', index=False)
+    print(f"✓ Saved Main Dataset: {dataset.shape[0]:,} rows × {dataset.shape[1]} columns")
     
-    # Create metadata sheet - build lists to ensure same length
+    # Create metadata sheet
     descriptions = [f'Volume at month {col.replace("volume_m", "")} before generic entry' for col in volume_cols]
     descriptions.extend([
         'Average volume (months -12 to -1)',
@@ -224,7 +236,7 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         'Small molecule drug (True/False)',
         'Country code',
         'Brand name',
-        'Monthly volume (target variable)'
+        'Monthly volume (target variable - OUTPUT)'
     ])
     
     sources = ['df_volume (pre-entry)'] * len(volume_cols)
@@ -234,8 +246,8 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
     
     data_types = ['Numeric (time series)'] * len(volume_cols)
     data_types.extend(['Numeric', 'Numeric', 'Categorical', 'Numeric'])
-    data_types.extend(['Categorical', 'Categorical', 'Numeric', 'Boolean', 'Boolean'])  # 5 medicine info columns
-    data_types.extend(['Categorical', 'Categorical', 'Numeric'])  # country, brand_name, volume
+    data_types.extend(['Categorical', 'Categorical', 'Numeric', 'Boolean', 'Boolean'])
+    data_types.extend(['Categorical', 'Categorical', 'Numeric'])
     
     types = ['Predictor'] * len(predictor_cols) + ['Output']
     
@@ -252,6 +264,7 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
     })
     
     metadata.to_excel(writer, sheet_name='Metadata', index=False)
+    print(f"✓ Saved Metadata: Column descriptions and types")
     
     # Create summary statistics
     summary_stats = pd.DataFrame({
@@ -284,14 +297,22 @@ with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
     })
     
     summary_stats.to_excel(writer, sheet_name='Summary', index=False)
+    print(f"✓ Saved Summary: Dataset statistics")
 
-print(f"\nSaved to: {output_file}")
+print(f"\n✓ Excel file saved: {output_file}")
 print("\nExcel file contains 3 sheets:")
-print("  1. Main Dataset - Full dataset with all predictors and output (missing values as NaN)")
-print("  2. Metadata - Column descriptions and types")
-print("  3. Summary - Dataset statistics")
+print("  1. Main Dataset - One row per brand-month (months 0-23)")
+print("     All brand information aggregated from all source files")
+print("     Missing values preserved as NaN (no preprocessing)")
+print("  2. Metadata - Column descriptions, sources, and data types")
+print("  3. Summary - Dataset statistics and overview")
 
 print("\n" + "=" * 80)
-print("AGGREGATION COMPLETE! (NO PREPROCESSING)")
+print("AGGREGATION COMPLETE!")
 print("=" * 80)
-print("\nNOTE: Missing values are preserved as NaN - no imputation performed")
+print("\nDataset Structure:")
+print(f"  - Each row = one brand-month combination (for months 0-23)")
+print(f"  - Each row contains ALL brand information from all source files")
+print(f"  - Predictors: {len(predictor_cols)} features")
+print(f"  - Output: volume (monthly volume for that brand-month)")
+print(f"  - Missing values: Preserved as NaN (no imputation)")
